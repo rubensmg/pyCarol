@@ -9,24 +9,6 @@ from .dockertask import EasyDockerTask, Task
 
 logger = logging.getLogger('luigi-interface')
 
-from pykube.config import KubeConfig
-from pykube.http import HTTPClient
-from pykube.objects import Job, Pod
-
-
-
-#TODO we can use or remove this.
-class kubernetes(luigi.Config):
-    auth_method = luigi.Parameter(
-        default="service-account",
-        description="Authorization method to access the cluster")
-    kubeconfig_path = luigi.Parameter(
-        default="~/.kube/config",
-        description="Path to kubeconfig file for cluster authentication")
-    max_retrials = luigi.IntParameter(
-        default=0,
-        description="Max retrials in event of job failure")
-
 
 class EasyKubernetesTask(EasyDockerTask):
 
@@ -36,22 +18,12 @@ class EasyKubernetesTask(EasyDockerTask):
     image
     job_namespace
     """
-    image_pull_policy = 'Never' #TODO Think if it is the best place to use this variable.
-                                # possible values "IfNotPresent" or "Never" or "Always"
-                                # production should be "IfNotPresent"
-                                #local should be "Never"
+
     __POLL_TIME = 5  # see __track_job
     _kubernetes_config = None  # Needs to be loaded at runtime
 
     def _init_kubernetes(self):
         self.__logger = logger
-        self.__logger.debug("Kubernetes auth method: " + self.auth_method)
-        if self.auth_method == "kubeconfig":
-            self.__kube_api = HTTPClient(KubeConfig.from_file(self.kubeconfig_path))
-        elif self.auth_method == "service-account":
-            self.__kube_api = HTTPClient(KubeConfig.from_service_account())
-        else:
-            raise ValueError("Illegal auth_method")
         self.job_uuid = str(uuid.uuid4().hex)
         now = datetime.utcnow()
         self.uu_name = "%s-%s-%s" % (self.name, now.strftime('%Y%m%d%H%M%S'), self.job_uuid[:16])
@@ -131,6 +103,25 @@ class EasyKubernetesTask(EasyDockerTask):
         See: https://kubernetes.io/docs/concepts/workloads/controllers/jobs-run-to-completion/#pod-backoff-failure-policy
         """
         return 1
+
+    @property
+    def job_namespace(self):
+        return os.environ['CAROLTENANT']
+
+    @property
+    def job_env_variables(self):
+
+        env_var = dict(CAROLCONNECTORID=os.environ['CAROLCONNECTORID'],
+                       CAROLORGANIZATION=os.environ['CAROLORGANIZATION'],
+                       CAROLAPPOAUTH=os.environ['CAROLAPPOAUTH'],
+                       LONGTASKID=os.environ.get('LONGTASKID', ''),
+                       CAROLTENANT=os.environ['CAROLTENANT'],
+                       CAROLAPPNAME=os.environ['CAROLAPPNAME'],
+                       IMAGE_NAME=os.environ['IMAGE_NAME'],
+                       CDMLINE=self.command,
+                    )
+
+        return env_var
 
     @property
     def delete_on_success(self):
@@ -292,17 +283,7 @@ class EasyKubernetesTask(EasyDockerTask):
             self._init_kubernetes()
             # Render job
             job_json = self._create_job_json()
-            job_json = self._add_env_variables(job_json)
 
-            if self.active_deadline_seconds is not None:
-                job_json['spec']['activeDeadlineSeconds'] = \
-                    self.active_deadline_seconds
-            # Update user labels
-            job_json['metadata']['labels'].update(self.labels)
-            # Add default restartPolicy if not specified
-            if "restartPolicy" not in self.spec_schema:
-                job_json["spec"]["template"]["spec"]["restartPolicy"] = "Never"
-            # Submit job
             self.__logger.info("Submitting Kubernetes Job: " + self.uu_name)
             job = Job(self.__kube_api, job_json)
             job.create()
@@ -311,43 +292,19 @@ class EasyKubernetesTask(EasyDockerTask):
             self.__track_job()
 
     def _create_job_json(self):
+
         job_json = {
-            "apiVersion": "batch/v1",
-            "kind": "Job",
-            "metadata": {
-                "name": self.uu_name,
-                "labels": {
+            "env": self.job_env_variables,
+            "image": self.DOCKER_IMAGE,
+            "labels": {
                     "spawned_by": "luigi",
                     "luigi_task_id": self.job_uuid
                 },
-                # "namespace": os.environ.get('CAROLTENANTID', '')
-                "namespace": self.job_namespace
-            },
-            "spec": {
-                "backoffLimit": self.backoff_limit,
-                "template": {
-                    "metadata": {
-                        "name": self.uu_name
-                    },
-                    "spec": self.spec_schema
-                }
-            }
+            "name": self.job_namespace,
+            "preemptible": False,
+            "tenant": self.name,
+            "type": "c1.micro",
+            "version": "v1.3.5"
         }
-
-        return job_json
-
-    def _add_env_variables(self,job_json):
-
-
-        env_var = dict(CAROLCONNECTORID=os.environ['CAROLCONNECTORID'],
-                       CAROLAPPOAUTH=os.environ['CAROLAPPOAUTH'],
-                       LONGTASKID=os.environ.get('LONGTASKID', ''),
-                       CAROLTENANT=os.environ['CAROLTENANT'],
-                       CAROLAPPNAME=os.environ['CAROLAPPNAME'],
-                       IMAGE_NAME=os.environ['IMAGE_NAME'],
-                          )
-        #env_var = self.get_whole_env()
-        env_var = [{'name': key, 'value': value} for key, value in env_var.items()]
-        job_json['spec']['template']['spec']['containers'][0]['env'] = env_var
 
         return job_json

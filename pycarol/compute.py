@@ -1,4 +1,4 @@
-
+import requests
 
 class Compute:
 
@@ -16,3 +16,8 @@ class Compute:
                                        method='GET')
 
         return response
+
+
+
+    def create_job(self):
+        pass
