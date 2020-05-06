@@ -3,16 +3,15 @@ import time
 import uuid
 from datetime import datetime
 import os
-
-import luigi
-from .dockertask import EasyDockerTask, Task
+from luigi import BoolParameter
 from ...compute import Compute
 from ...carol import Carol
+from .task import Task
 
 logger = logging.getLogger('luigi-interface')
 
 
-class EasyKubernetesTask(EasyDockerTask):
+class EasyKubernetesTask(Task):
 
     """
     Need to define the following in each task:
@@ -22,7 +21,28 @@ class EasyKubernetesTask(EasyDockerTask):
     """
 
     __POLL_TIME = 5  # see __track_job
-    _kubernetes_config = None  # Needs to be loaded at runtime
+    runlocal = BoolParameter(significant=False)
+
+    def _cmd_params(self):
+        l = []
+        for k, v in self.to_str_params().items():
+            if k == 'runlocal':
+                continue
+            l.append("--{}".format(k).replace("_", "-"))
+            l.append(v)
+        return l
+
+    @property
+    def command(self):
+        cmd = ["python", "-m", "luigi", "--local-scheduler", self.task_family, "--module",
+               self.task_module, "--runlocal",
+               *self._cmd_params()]
+
+        #TODO: Hack
+        cmd = ' '.join(cmd)
+
+        return cmd
+
 
     def _init_kubernetes(self):
         self.__logger = logger
@@ -64,28 +84,6 @@ class EasyKubernetesTask(EasyDockerTask):
                     )
 
         return env_var
-
-    @property
-    def delete_on_success(self):
-        """
-        Delete the Kubernetes workload if the job has ended successfully.
-        """
-        return True
-
-    @property
-    def print_pod_logs_on_exit(self):
-        """
-        Fetch and print the pod logs once the job is completed.
-        """
-        return True
-
-    @property
-    def active_deadline_seconds(self):
-        """
-        Time allowed to successfully schedule pods.
-        See: https://kubernetes.io/docs/concepts/workloads/controllers/jobs-run-to-completion/#job-termination-and-cleanup
-        """
-        return None
 
     def __get_job_status(self, uri):
         status = self.job.track_process(uri)
