@@ -29,7 +29,7 @@ class EasyKubernetesTask(EasyDockerTask):
         self.job_uuid = str(uuid.uuid4().hex)
         now = datetime.utcnow()
         namespace = self.get_task_namespace()
-        file_id = luigi.task.task_id_str(self.get_task_family(), self.to_str_params(only_significant=True))
+        file_id = self.task_id
         file_id += "-" + self.job_uuid[:5]
         self.uu_name = file_id.split(namespace+'.')[-1]
 
