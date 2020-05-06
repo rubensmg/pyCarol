@@ -1,5 +1,5 @@
 import requests
-
+import os
 class Compute:
 
     """
@@ -18,6 +18,28 @@ class Compute:
         return response
 
 
+    def create_job(self, name,tenant,  env, image, labels, type, preemptible=False ):
+        payload = {
+            "env": env,
+            "image": image,
+            "labels": labels,
+            "name": name,
+            "preemptible": preemptible,
+            "tenant": tenant,
+            "type": type
+        }
 
-    def create_job(self):
-        pass
+        headers = {"x-auth-token": os.environ['OPERATORTOKEN']}
+
+        url = 'https://api.operator.qarol.ai/api/batches'
+        r = requests.request('POST', url=url, headers=headers, json=payload)
+
+        return r.json()
+
+    def track_process(self, uri):
+
+        headers = {"x-auth-token": os.environ['OPERATORTOKEN']}
+
+        url = f'https://api.operator.qarol.ai{uri}'
+        r = requests.request('GET', url=url, headers=headers)
+        return r.json()

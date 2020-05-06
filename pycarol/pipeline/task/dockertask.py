@@ -22,7 +22,8 @@ class EasyDockerTask(Task):
         cmd = ["luigi","--local-scheduler", self.task_family, "--module", self.task_module, "--runlocal",
                *self._cmd_params()]
 
-        cmd = '$1$'.join(cmd)
+        #TODO: Hack
+        cmd = ' '.join(cmd)
 
         return cmd
 

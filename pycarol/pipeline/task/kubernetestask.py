@@ -6,6 +6,8 @@ import os
 
 import luigi
 from .dockertask import EasyDockerTask, Task
+from ...compute import Compute
+from ...carol import Carol
 
 logger = logging.getLogger('luigi-interface')
 
@@ -26,36 +28,10 @@ class EasyKubernetesTask(EasyDockerTask):
         self.__logger = logger
         self.job_uuid = str(uuid.uuid4().hex)
         now = datetime.utcnow()
-        self.uu_name = "%s-%s-%s" % (self.name, now.strftime('%Y%m%d%H%M%S'), self.job_uuid[:16])
-
-    @property
-    def auth_method(self):
-        """
-        This can be set to ``kubeconfig`` or ``service-account``.
-        It defaults to ``kubeconfig``.
-
-        For more details, please refer to:
-
-        - kubeconfig: http://kubernetes.io/docs/user-guide/kubeconfig-file
-        - service-account: http://kubernetes.io/docs/user-guide/service-accounts
-        """
-        return "service-account"
-
-    @property
-    def kubeconfig_path(self):
-        """
-        Path to kubeconfig file used for cluster authentication.
-        It defaults to "~/.kube/config", which is the default location
-        when using minikube (http://kubernetes.io/docs/getting-started-guides/minikube).
-        When auth_method is ``service-account`` this property is ignored.
-
-        **WARNING**: For Python versions < 3.5 kubeconfig must point to a Kubernetes API
-        hostname, and NOT to an IP address.
-
-        For more details, please refer to:
-        http://kubernetes.io/docs/user-guide/kubeconfig-file
-        """
-        return self.kubernetes_config.kubeconfig_path
+        namespace = self.get_task_namespace()
+        file_id = luigi.task.task_id_str(self.get_task_family(), self.to_str_params(only_significant=True))
+        file_id += "-" + self.job_uuid[:5]
+        self.uu_name = file_id.split(namespace+'.')[-1]
 
     @property
     def name(self):
@@ -69,40 +45,6 @@ class EasyKubernetesTask(EasyDockerTask):
         return '-'.join(self.__class__.__name__.lower().split('.'))
         #return '-'.join(self.get_task_family().lower().split('.')[-2:])
 
-    @property
-    def labels(self):
-        """
-        Return custom labels for kubernetes job.
-        example::
-        ``{"run_dt": datetime.date.today().strftime('%F')}``
-        """
-        return {}
-
-    @property
-    def spec_schema(self):
-        return {
-            "containers": [{
-                "name": self.name,
-                "image": self.image,
-                "command": self.command,
-                "imagePullPolicy": self.image_pull_policy,
-            }],
-        }
-
-    @property
-    def max_retrials(self):
-        """
-        Maximum number of retrials in case of failure.
-        """
-        return self.kubernetes_config.max_retrials
-
-    @property
-    def backoff_limit(self):
-        """
-        Maximum number of retries before considering the job as failed.
-        See: https://kubernetes.io/docs/concepts/workloads/controllers/jobs-run-to-completion/#pod-backoff-failure-policy
-        """
-        return 1
 
     @property
     def job_namespace(self):
@@ -117,7 +59,7 @@ class EasyKubernetesTask(EasyDockerTask):
                        LONGTASKID=os.environ.get('LONGTASKID', ''),
                        CAROLTENANT=os.environ['CAROLTENANT'],
                        CAROLAPPNAME=os.environ['CAROLAPPNAME'],
-                       IMAGE_NAME=os.environ['IMAGE_NAME'],
+                       IMAGE_NAME=os.environ['DOCKER_IMAGE'],
                        CDMLINE=self.command,
                     )
 
@@ -145,28 +87,31 @@ class EasyKubernetesTask(EasyDockerTask):
         """
         return None
 
-    @property
-    def kubernetes_config(self):
-        if not self._kubernetes_config:
-            self._kubernetes_config = kubernetes()
-        return self._kubernetes_config
+    def __get_job_status(self, uri):
+        status = self.job.track_process(uri)
+        return status['status']
 
-    def __track_job(self):
+    def __track_job(self, job):
         """Poll job status while active"""
-        while not self.__verify_job_has_started():
+
+        uri = job['status_url']
+        status = self.__get_job_status(uri)
+
+        while status in ['Creating', 'ContainerCreating', 'Starting', 'Pending']:
             time.sleep(self.__POLL_TIME)
             self.__logger.debug("Waiting for Kubernetes job " + self.uu_name + " to start")
-        self.__print_kubectl_hints()
+            status = self.__get_job_status(uri)
 
-        status = self.__get_job_status()
-        while status == "RUNNING":
+        status = self.__get_job_status(uri)
+        while status == "Running":
             self.__logger.debug("Kubernetes job " + self.uu_name + " is running")
             time.sleep(self.__POLL_TIME)
-            status = self.__get_job_status()
+            status = self.__get_job_status(uri)
 
-        assert status != "FAILED", "Kubernetes job " + self.uu_name + " failed"
+        assert status not in ["Failed","ImagePullBackOff","ErrImagePull","CrashLoopBackOff",
+                              "Error","Unknown","Job has reached the specified backoff limit"], \
+            "Kubernetes job " + self.uu_name + " failed"
 
-        # status == "SUCCEEDED"
         self.__logger.info("Kubernetes job " + self.uu_name + " succeeded")
         self.signal_complete()
 
@@ -181,99 +126,6 @@ class EasyKubernetesTask(EasyDockerTask):
         """
         pass
 
-    def __get_pods(self):
-
-        self.__logger.info(f"checking __get_pods")
-        pod_objs = Pod.objects(self.__kube_api) \
-            .filter(namespace=self.job_namespace, selector="job-name=" + self.uu_name) \
-            .response['items']
-        return [Pod(self.__kube_api, p) for p in pod_objs]
-
-    def __get_job(self):
-        jobs = Job.objects(self.__kube_api) \
-            .filter(namespace=self.job_namespace, selector="luigi_task_id=" + self.job_uuid) \
-            .response['items']
-
-        assert len(jobs) == 1, "Kubernetes job " + self.job_namespace +"/"+ self.uu_name + " not found" "(job_uuid= "+  self.job_uuid + ")"
-        return Job(self.__kube_api, jobs[0])
-
-    def __print_pod_logs(self):
-        for pod in self.__get_pods():
-            logs = pod.logs(timestamps=True).strip()
-            self.__logger.info("Fetching logs from " + pod.name)
-            if len(logs) > 0:
-                for l in logs.split('\n'):
-                    self.__logger.info(l)
-
-    def __print_kubectl_hints(self):
-        self.__logger.info("To stream Pod logs, use:")
-        for pod in self.__get_pods():
-            self.__logger.info("`kubectl logs -f pod/%s`" % pod.name)
-
-    def __verify_job_has_started(self):
-        """Asserts that the job has successfully started"""
-        # Verify that the job started
-        self.__get_job()
-
-        # Verify that the pod started
-        pods = self.__get_pods()
-
-        assert len(pods) > 0, "No pod scheduled by " + self.uu_name
-        for pod in pods:
-            status = pod.obj['status']
-            for cont_stats in status.get('containerStatuses', []):
-                if 'terminated' in cont_stats['state']:
-                    t = cont_stats['state']['terminated']
-                    err_msg = "Pod %s %s (exit code %d). Logs: `kubectl logs pod/%s`" % (
-                        pod.name, t['reason'], t['exitCode'], pod.name)
-                    assert t['exitCode'] == 0, err_msg
-
-                if 'waiting' in cont_stats['state']:
-                    wr = cont_stats['state']['waiting']['reason']
-                    assert wr == 'ContainerCreating', "Pod %s %s. Logs: `kubectl logs pod/%s`" % (
-                        pod.name, wr, pod.name)
-
-            for cond in status.get('conditions', []):
-                if 'message' in cond:
-                    if cond['reason'] == 'ContainersNotReady':
-                        return False
-                    assert cond['status'] != 'False', \
-                        "[ERROR] %s - %s" % (cond['reason'], cond['message'])
-        return True
-
-    def __get_job_status(self):
-        """Return the Kubernetes job status"""
-        # Figure out status and return it
-        job = self.__get_job()
-
-        if "succeeded" in job.obj["status"] and job.obj["status"]["succeeded"] > 0:
-            job.scale(replicas=0)
-            if self.print_pod_logs_on_exit:
-                self.__print_pod_logs()
-            if self.delete_on_success:
-                self.__delete_job_cascade(job)
-            return "SUCCEEDED"
-
-        if "failed" in job.obj["status"]:
-            failed_cnt = job.obj["status"]["failed"]
-            self.__logger.debug("Kubernetes job " + self.uu_name
-                                + " status.failed: " + str(failed_cnt))
-            if self.print_pod_logs_on_exit:
-                self.__print_pod_logs()
-            if failed_cnt > self.max_retrials:
-                job.scale(replicas=0)  # avoid more retrials
-                return "FAILED"
-        return "RUNNING"
-
-    def __delete_job_cascade(self, job):
-        delete_options_cascade = {
-            "kind": "DeleteOptions",
-            "apiVersion": "v1",
-            "propagationPolicy": "Background"
-        }
-        r = self.__kube_api.delete(json=delete_options_cascade, **job.api_kwargs())
-        if r.status_code != 200:
-            self.__kube_api.raise_for_status(r)
 
     def run(self):
         if self.runlocal:
@@ -285,11 +137,11 @@ class EasyKubernetesTask(EasyDockerTask):
             job_json = self._create_job_json()
 
             self.__logger.info("Submitting Kubernetes Job: " + self.uu_name)
-            job = Job(self.__kube_api, job_json)
-            job.create()
+            self.job = Compute(Carol())
+            job = self.job.create_job(**job_json)
             # Track the Job (wait while active)
             self.__logger.info("Start tracking Kubernetes Job: " + self.uu_name)
-            self.__track_job()
+            self.__track_job(job)
 
     def _create_job_json(self):
 
@@ -300,11 +152,10 @@ class EasyKubernetesTask(EasyDockerTask):
                     "spawned_by": "luigi",
                     "luigi_task_id": self.job_uuid
                 },
-            "name": self.job_namespace,
+            "name": self.uu_name,
             "preemptible": False,
-            "tenant": self.name,
-            "type": "c1.micro",
-            "version": "v1.3.5"
+            "tenant": self.job_namespace,
+            "type": "c1.micro"
         }
 
         return job_json
