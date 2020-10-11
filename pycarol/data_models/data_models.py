@@ -669,6 +669,36 @@ class DataModel:
 
         return d
 
+    def enable_disable_storage_type(self, storage_type,  dm_name=None, dm_id=None, enable=True):
+        """
+        Enable different Carol storage Types
+
+        Args:
+            storage_type: `str`
+                Values are:
+                    "REALTIME" for real time data.
+                    "SQL" for SQL.
+            dm_name: `str` default None
+                 Data model name
+            dm_id: `str` default None
+                 Data model ID
+            enable: `bool` default `True`
+                Enable the storage. To delete a storage type use `enable=False`
+
+        Returns: `dict`
+            Carol API response.
+
+        """
+
+        if dm_name:
+            dm_id = self.get_by_name(dm_name)['mdmId']
+        elif dm_id is None:
+            raise ValueError("Either `dm_id` or `dm_name` must be set.")
+
+        url = f'v1/entities/templates/{dm_id}/storageType/{storage_type}'
+        payload = {"mdmConsolidationTriggers": [], "mdmEnabled": enable, "mdmStorageType": storage_type}
+        return self.carol.call_api(url, method='PUT', data=payload)
+
 
 class entIntType(object):
     ent_type = 'long'
